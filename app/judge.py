@@ -15,12 +15,14 @@ pass / fail / unsure のどれかを返させる（構造化出力）。unsure �
 
 import argparse
 import json
+import os
 import re
+import tempfile
 import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -188,7 +190,12 @@ def build_test_model() -> FunctionModel:
 
 
 # ---------------------------------------------------------------- 採点と集計
-def judge_cases(agent: Agent, cases: list[dict], wait: float = 0.0) -> dict[str, dict]:
+def judge_cases(
+    agent: Agent,
+    cases: list[dict],
+    wait: float = 0.0,
+    on_case_complete: Callable[[dict[str, dict]], None] | None = None,
+) -> dict[str, dict]:
     """評価セットを 1 件ずつ採点する。戻り値は id → {基準: {reason, verdict}}。"""
     verdicts: dict[str, dict] = {}
     print(f"採点中 {len(cases)} 件 ", end="", flush=True)
@@ -200,6 +207,8 @@ def judge_cases(agent: Agent, cases: list[dict], wait: float = 0.0) -> dict[str,
             "reason": "末尾（最後の行）に「第N回」があるかをコードで判定",
             "verdict": check_lecture_mark(case["answer"]),
         }
+        if on_case_complete:
+            on_case_complete(verdicts)
         print(".", end="", flush=True)
         if wait:
             time.sleep(wait)
@@ -321,6 +330,28 @@ def _rel(path: Path) -> Path:
     return path.relative_to(ROOT) if path.is_absolute() and path.is_relative_to(ROOT) else path
 
 
+def _save_judge_result(path: Path, result_data: dict) -> None:
+    """途中終了しても直前までの完全な JSON を残す。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            json.dump(result_data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            temp_path = Path(f.name)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="評価セットを LLM に採点させ、人のラベルとの一致率を出す")
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES, help="評価セット（jsonl）")
@@ -365,27 +396,50 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[model] {model_name}  temperature=0  rubric={_rel(args.rubric)}")
 
     judge = build_judge(model, rubric)
+    run_at = datetime.now().isoformat(timespec="seconds")
+    saved_count = 0
+
+    def save_progress(verdicts: dict[str, dict]) -> None:
+        nonlocal saved_count
+        saved_count = len(verdicts)
+        _save_judge_result(
+            args.out,
+            {
+                "model": model_name,
+                "rubric": str(_rel(args.rubric)),
+                "run_at": run_at,
+                "verdicts": verdicts,
+                "progress": {"completed": saved_count, "total": len(cases)},
+            },
+        )
+
     try:
-        verdicts = judge_cases(judge, cases, wait=args.wait)
+        verdicts = judge_cases(judge, cases, wait=args.wait, on_case_complete=save_progress)
     except ModelHTTPError as e:
         print("\n" + api_error_message(e.status_code, str(e.body)[:200]))
+        if saved_count:
+            print(f"採点済み {saved_count} 件の結果は {_rel(args.out)} に保存されています")
         raise SystemExit(1)
     except UnexpectedModelBehavior as e:
         print(f"\n判定の形式が正しくありませんでした（LLM の出力が pass / fail / unsure の形になりませんでした）: {str(e)[:200]}")
         print("もう一度実行してください。続くときは、rubric.md に書き足した文に、出力の形式を変える指示が混ざっていないか見てください")
+        if saved_count:
+            print(f"採点済み {saved_count} 件の結果は {_rel(args.out)} に保存されています")
         raise SystemExit(1)
 
     summary = summarize(cases, verdicts, labels)
     print_summary(summary)
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        json.dumps(
-            {"model": model_name, "rubric": str(_rel(args.rubric)), "run_at": datetime.now().isoformat(timespec="seconds"),
-             "verdicts": verdicts, "summary": summary},
-            ensure_ascii=False, indent=2,
-        ),
-        encoding="utf-8",
+    _save_judge_result(
+        args.out,
+        {
+            "model": model_name,
+            "rubric": str(_rel(args.rubric)),
+            "run_at": run_at,
+            "verdicts": verdicts,
+            "summary": summary,
+            "progress": {"completed": len(verdicts), "total": len(cases)},
+        },
     )
     print(f"\n→ {_rel(args.out)} に保存しました")
 
