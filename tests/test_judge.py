@@ -48,12 +48,23 @@ def test_cases_and_rubric_are_consistent():
     assert set(labels) == {c["id"] for c in cases}
 
 
-def test_judge_pipeline_with_fake_model():
+def test_judge_pipeline_with_fake_model(tmp_path):
     cases = read_jsonl(DEFAULT_CASES)
     labels = load_labels(INSTRUCTOR_LABELS)
     agent = build_judge(build_test_model(), DEFAULT_RUBRIC.read_text(encoding="utf-8"))
 
-    verdicts = judge_cases(agent, cases)
+    saved_counts = []
+
+    def save_progress(current):
+        judge._save_judge_result(
+            tmp_path / "judge_result.json",
+            {"verdicts": current, "progress": {"completed": len(current), "total": len(cases)}},
+        )
+        saved = judge.json.loads((tmp_path / "judge_result.json").read_text(encoding="utf-8"))
+        saved_counts.append(saved["progress"]["completed"])
+
+    verdicts = judge_cases(agent, cases, on_case_complete=save_progress)
+    assert saved_counts == list(range(1, len(cases) + 1))
     assert set(verdicts) == {c["id"] for c in cases}
     for v in verdicts.values():
         for key, _ in ALL_CRITERIA:
