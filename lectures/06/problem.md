@@ -179,6 +179,8 @@ uv run python -m app.mcp_agent --trace "https://modelcontextprotocol.io/ の冒�
 ```bash
 uv run python -m app.mcp_agent --list-tools
 uv run python -m app.mcp_agent --trace "AWSのドキュメントを検索して、Amazon S3 のバージョニングを2行で説明して"
+uv run python -m app.mcp_agent --trace "AWSのリージョンを検索して，説明して"
+
 ```
 
 1 つ目のコマンドの表示（はじめの 3 行）：
